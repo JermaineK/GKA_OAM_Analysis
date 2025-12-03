@@ -39,3 +39,18 @@ SciPy is only needed if you later add the MAT-reader script.
 - BORGT slope is guarded with intensity thresholds and outlier filtering; see `borgt_status` for fit quality.
 - Parity/oddness is often the cleanest discriminator between petals/Talbot vs sorter outputs.
 - This is a straight copy from `C:\Weather warning project\Data and code` for a dedicated repo.
+
+## DM3 (Gatan) conversion
+- DM3 files under `Additional data/` can be converted to PNG via `hyperspy` + OpenCV. Example inline script:
+  ```
+  import hyperspy.api as hs, cv2, numpy as np
+  from pathlib import Path
+  root = Path("Additional data"); out = root/"converted_png"; out.mkdir(exist_ok=True)
+  for dm3 in root.glob("*.dm3"):
+      data = np.asarray(hs.load(dm3).data)
+      if data.ndim > 2: data = data.reshape((-1, data.shape[-2], data.shape[-1]))[0]
+      dmin, dmax = data.min(), data.max(); span = dmax - dmin if dmax != dmin else 1
+      img = ((data - dmin)/span * 65535).clip(0, 65535).astype(np.uint16)
+      cv2.imwrite(str(out/(dm3.stem+".png")), img)
+  ```
+- After conversion, run `gka_oam_extended.py --root Additional data/converted_png --out-csv gka_oam_image_summary_v4_additional.csv`.

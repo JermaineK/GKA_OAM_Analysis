@@ -14,14 +14,14 @@ import pandas as pd  # noqa: E402
 
 
 def main():
-    root = Path(r"C:\Weather warning project\Data and code")
-    # prefer latest v3, fall back to v2
-    for name in ["gka_oam_image_summary_v3.csv", "gka_oam_image_summary_v2.csv"]:
+    root = Path(__file__).resolve().parent
+    # prefer latest v4, then v3, then v2
+    for name in ["gka_oam_image_summary_v4.csv", "gka_oam_image_summary_v3.csv", "gka_oam_image_summary_v2.csv"]:
         csv_path = root / name
         if csv_path.exists():
             break
     else:
-        raise SystemExit("Missing summary CSV (v3/v2). Run gka_oam_extended.py first.")
+        raise SystemExit("Missing summary CSV (v4/v3/v2). Run gka_oam_extended.py first.")
 
     df = pd.read_csv(csv_path)
     if "source" not in df.columns:

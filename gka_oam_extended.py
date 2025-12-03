@@ -13,10 +13,27 @@ import cv2
 import numpy as np
 import pandas as pd
 import matplotlib
+from scipy.stats import linregress
+from scipy.signal import savgol_filter
 
 # headless by default; plots are optional
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+
+
+def odd_contrast_ring(intensity: np.ndarray) -> float:
+    """
+    Mirror-odd contrast for a 1D ring intensity I(theta).
+
+    eta = |I(theta) - I(theta+pi)| / (0.5*(I(theta)+I(theta+pi))).
+    """
+    if intensity.size == 0:
+        return float("nan")
+    I_norm = intensity / (np.max(intensity) + 1e-9)
+    shift = intensity.size // 2
+    I_shift = np.roll(I_norm, shift)
+    eta = np.abs(I_norm - I_shift) / (0.5 * (I_norm + I_shift) + 1e-9)
+    return float(np.nanmean(eta))
 
 
 def parse_shape(shape_str: Optional[str]) -> Optional[Tuple[int, ...]]:
@@ -169,6 +186,7 @@ def gka_metrics(
     r_samples: Sequence[float],
     intensity_floor: float,
     min_radii: int,
+    knee_window: int,
     save_plots: bool,
     plot_dir: Path,
     plot_label: str,
@@ -202,6 +220,7 @@ def gka_metrics(
     r_vals = []
     contrasts = []
     mean_norm = []
+    eta_vals = []
     for r_here in r_samples:
         _, I_r = extract_I_theta(image, cx, cy, r_here)
         I_r_norm = I_r / (I_r.max() + 1e-6)
@@ -212,10 +231,12 @@ def gka_metrics(
         frac = r_here / max(radius, 1e-6)
         key = f"contrast_f{int(round(frac * 100)):02d}"
         contrast_per_r[key] = c_val
+        eta_vals.append(odd_contrast_ring(I_r_norm))
 
     r_vals = np.array(r_vals, dtype=np.float64)
     contrasts = np.array(contrasts, dtype=np.float64)
     mean_norm = np.array(mean_norm, dtype=np.float64)
+    eta_vals = np.array(eta_vals, dtype=np.float64)
 
     # BORGT-like slope: log contrast vs log radius, with guards and a light outlier filter
     base_mask = (
@@ -251,6 +272,52 @@ def gka_metrics(
     elif slope_n > 0:
         slope_status = "low_signal"
 
+    # Mirror-odd slope vs radius
+    eta_mask = (
+        np.isfinite(r_vals)
+        & np.isfinite(eta_vals)
+        & np.isfinite(mean_norm)
+        & (eta_vals > 0)
+        & (r_vals > 0)
+        & (mean_norm >= intensity_floor)
+    )
+    eta_status = "insufficient_radii"
+    eta_slope = np.nan
+    eta_intercept = np.nan
+    eta_r2 = np.nan
+    eta_knee = np.nan
+    eta_n = int(eta_mask.sum())
+    if eta_n >= min_radii:
+        log_r_eta = np.log(r_vals[eta_mask])
+        log_eta = np.log(eta_vals[eta_mask])
+        try:
+            sl, itc, r_val, _, se_val = linregress(log_r_eta, log_eta)
+        except Exception:
+            eta_status = "fit_failed"
+        else:
+            eta_slope = float(sl)
+            eta_intercept = float(itc)
+            eta_r2 = float(r_val**2)
+            eta_status = "ok"
+            # knee via smoothed curvature on log-log
+            size_ok = log_r_eta.size
+            if size_ok >= max(5, knee_window):
+                try:
+                    w = knee_window if knee_window % 2 == 1 else knee_window + 1
+                    if w >= size_ok:
+                        w = size_ok if size_ok % 2 == 1 else size_ok - 1
+                    d1 = np.gradient(log_eta, log_r_eta)
+                    d1s = savgol_filter(d1, window_length=max(3, w), polyorder=2)
+                    d2 = np.gradient(d1s, log_r_eta)
+                    idx = int(np.argmax(np.abs(d2)))
+                    eta_knee = float(r_vals[eta_mask][idx])
+                except Exception:
+                    eta_knee = np.nan
+            else:
+                eta_status = "knee_insufficient"
+    elif eta_n > 0:
+        eta_status = "low_signal"
+
     if save_plots:
         plot_dir.mkdir(parents=True, exist_ok=True)
         plt.figure(figsize=(8, 3))
@@ -276,6 +343,12 @@ def gka_metrics(
         "borgt_intercept": borgt_intercept,
         "borgt_status": slope_status,
         "borgt_n": slope_n,
+        "eta_slope": eta_slope,
+        "eta_intercept": eta_intercept,
+        "eta_r2": eta_r2,
+        "eta_status": eta_status,
+        "eta_n": eta_n,
+        "eta_knee": eta_knee,
         **contrast_per_r,
     }
 
@@ -311,7 +384,8 @@ def main():
     parser.add_argument("--r-count", type=int, default=9, help="number of radii to sample between r-min and r-max")
     parser.add_argument("--intensity-floor", type=float, default=0.02, help="minimum mean ring intensity (normalized) to keep a radius in slope fit")
     parser.add_argument("--min-radii", type=int, default=6, help="minimum # of good radii required for BORGT slope fit")
-    parser.add_argument("--out-csv", default="gka_oam_image_summary_v3.csv", help="output CSV path")
+    parser.add_argument("--knee-window", type=int, default=7, help="window (odd) for knee smoothing on log-log curves")
+    parser.add_argument("--out-csv", default="gka_oam_image_summary_v4.csv", help="output CSV path")
     parser.add_argument("--plots", action="store_true", help="save I(theta) plots")
     parser.add_argument("--plot-dir", default=None, help="optional plot directory (defaults to <root>/gka_oam_plots)")
 
@@ -343,6 +417,7 @@ def main():
             r * r_fractions,
             args.intensity_floor,
             args.min_radii,
+            args.knee_window,
             args.plots,
             plot_dir,
             plot_label=path.stem,
@@ -382,6 +457,7 @@ def main():
                     r * r_fractions,
                     args.intensity_floor,
                     args.min_radii,
+                    args.knee_window,
                     args.plots,
                     plot_dir,
                     plot_label=f"{path.stem}_{idx}",
