@@ -36,6 +36,8 @@ This file aggregates key observations from the processed datasets to keep reprod
 - DM3 conversion: see README DM3 section; run `gka_oam_extended.py` on converted PNGs.
 - Excel plots: `visualize_excel_data.py`.
 - Parsed new data plots: `visualize_parsed_newdata.py`.
+- Invariant table: `compute_invariant_table.py` (writes `Results/summaries/invariant_meta.csv`).
+- Symmetry filters: see `symmetry_filters.py` (parity-odd, spiral-harmonic, fixed log-spiral kernel, slow-tick projection).
 
 ## Evidence snapshot (high level)
 - Boundary–odd / parity channel is active in multiple independent datasets (log-spiral DM3, carbon spectra).
