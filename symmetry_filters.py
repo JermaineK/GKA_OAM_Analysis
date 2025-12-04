@@ -132,6 +132,8 @@ def knee_on_loglog(r: np.ndarray, eta: np.ndarray, window: int = 9, polyorder: i
     Knee via curvature on log-log: smooth log(eta) vs log(r) with Savitzky–Golay, then find max |d2|.
     """
     mask = (eta > 0) & (r > 0) & np.isfinite(eta) & np.isfinite(r)
+    if mask.sum() < 3:
+        return KneeResult(r_knee=np.nan, d2=np.array([]), log_r=np.array([]), log_eta=np.array([]))
     log_r = np.log(r[mask])
     log_eta = np.log(eta[mask])
     if log_r.size < window:
