@@ -1,0 +1,26 @@
+# Large backup files (stored in recovered_backups/)
+recovered_backups/5715133.zip
+recovered_backups/5761427.zip
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
