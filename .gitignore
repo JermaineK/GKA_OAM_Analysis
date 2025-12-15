@@ -1,6 +1,8 @@
 # Large backup files (stored in recovered_backups/)
 recovered_backups/5715133.zip
 recovered_backups/5761427.zip
+# Large raw data (often >100MB); keep out of git history
+*.dm3
 
 # Python cache
 __pycache__/
