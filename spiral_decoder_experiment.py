@@ -975,6 +975,64 @@ def helical_projection(
     return best_proj
 
 
+def helical_spectrum_stability(
+    field: np.ndarray,
+    center: Tuple[float, float],
+    ells: Sequence[int] = (-3, -2, -1, 1, 2, 3),
+    bands: Sequence[Tuple[float, float]] = ((0.05, 0.45), (0.05, 0.25), (0.25, 0.45)),
+    center_offsets: Sequence[Tuple[float, float]] = ((0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)),
+) -> Dict[str, float]:
+    """
+    Robust spectrum estimate: aggregate phase-only helical projections across annuli and small center jitters.
+    Returns median/std per ell plus peak/stability diagnostics.
+    """
+    records: List[Dict[str, float]] = []
+    for r0, r1 in bands:
+        for dx, dy in center_offsets:
+            proj = helical_projection(
+                field,
+                center=(center[0] + dx, center[1] + dy),
+                ells=ells,
+                r_inner_frac=r0,
+                r_outer_frac=r1,
+                p=0.0,
+                n_rings=3,
+                phase_only=True,
+                scan_offsets=((0.0, 0.0),),
+            )
+            records.append(proj)
+    if not records:
+        return {"spec_peak_ell": 0.0, "spec_peak_ratio": 0.0, "spec_stability_frac": 0.0, "spec_n": 0}
+    vals_per_ell: Dict[int, List[float]] = {ell: [] for ell in ells}
+    peak_ells: List[int] = []
+    peak_ratios: List[float] = []
+    for rec in records:
+        for ell in ells:
+            vals_per_ell[ell].append(float(rec.get(f"proj_ell_{ell}", 0.0)))
+        peak_ells.append(int(rec.get("proj_peak_ell", 0)))
+        peak_ratios.append(float(rec.get("proj_peak_ratio", 0.0)))
+    med_spec = {ell: float(np.median(vals)) for ell, vals in vals_per_ell.items()}
+    std_spec = {ell: float(np.std(vals)) for ell, vals in vals_per_ell.items()}
+    med_items = sorted([(ell, val) for ell, val in med_spec.items()], key=lambda t: t[1], reverse=True)
+    peak_ell = med_items[0][0]
+    peak_val = med_items[0][1]
+    second_val = med_items[1][1] if len(med_items) > 1 else 1e-9
+    peak_ratio = float(peak_val / (second_val + 1e-9))
+    stability = float(peak_ells.count(peak_ell) / len(peak_ells))
+    out = {
+        "spec_peak_ell": float(peak_ell),
+        "spec_peak_val": float(peak_val),
+        "spec_peak_ratio": float(peak_ratio),
+        "spec_stability_frac": stability,
+        "spec_n": len(records),
+        "spec_peak_ratio_med": float(np.median(peak_ratios)),
+    }
+    for ell in ells:
+        out[f"spec_med_ell_{ell}"] = med_spec[ell]
+        out[f"spec_std_ell_{ell}"] = std_spec[ell]
+    return out
+
+
 def phase_circulation_annulus(
     field: np.ndarray,
     center: Tuple[float, float],
@@ -1728,6 +1786,8 @@ def run_trial(
     oam_proj_decoy: Optional[Dict[str, float]] = None
     proj_true: Dict[str, float] = {}
     proj_decoy: Dict[str, float] = {}
+    spec_true: Dict[str, float] = {}
+    spec_decoy: Dict[str, float] = {}
     knee_amp_true = float("nan")
     knee_amp_decoy = float("nan")
     knee_phasegrad_true = float("nan")
@@ -1866,6 +1926,12 @@ def run_trial(
             scan_offsets=proj_scan_offsets,
         )
         diag_true.update(proj_true)
+        spec_true = helical_spectrum_stability(
+            field_true,
+            center=oam_center_true,
+            ells=(-3, -2, -1, 1, 2, 3),
+        )
+        diag_true.update(spec_true)
         sideband_diag_true = diag_true
         winding_true = phase_winding(field_true, center=core_true)
         oam_pre_true = compute_oam_with_gate(field_true, center=oam_center_true)
@@ -1965,6 +2031,12 @@ def run_trial(
             scan_offsets=proj_scan_offsets,
         )
         diag_decoy.update(proj_decoy)
+        spec_decoy = helical_spectrum_stability(
+            field_decoy,
+            center=oam_center_decoy,
+            ells=(-3, -2, -1, 1, 2, 3),
+        )
+        diag_decoy.update(spec_decoy)
         sideband_diag_decoy = diag_decoy
         winding_decoy = phase_winding(field_decoy, center=core_decoy)
         oam_pre_decoy = compute_oam_with_gate(field_decoy, center=oam_center_decoy)
@@ -2110,6 +2182,8 @@ def run_trial(
         "obs_features_decoy": obs_features_decoy,
         "proj_true": proj_true if ref_amp > 0.0 else {},
         "proj_decoy": proj_decoy if ref_amp > 0.0 else {},
+        "spec_true": spec_true if ref_amp > 0.0 else {},
+        "spec_decoy": spec_decoy if ref_amp > 0.0 else {},
         "sideband_diag_true": sideband_diag_true,
         "sideband_diag_decoy": sideband_diag_decoy,
         "winding_true": winding_true,
@@ -2233,6 +2307,36 @@ def run_trial(
         "proj_center_dy_true": proj_true.get("proj_center_dy", float("nan")),
         "proj_center_dx_decoy": proj_decoy.get("proj_center_dx", float("nan")),
         "proj_center_dy_decoy": proj_decoy.get("proj_center_dy", float("nan")),
+        "spec_peak_ell_true": spec_true.get("spec_peak_ell", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_peak_ratio_true": spec_true.get("spec_peak_ratio", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_stability_true": spec_true.get("spec_stability_frac", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_peak_ell_decoy": spec_decoy.get("spec_peak_ell", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_peak_ratio_decoy": spec_decoy.get("spec_peak_ratio", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_stability_decoy": spec_decoy.get("spec_stability_frac", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_-3_true": spec_true.get("spec_med_ell_-3", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_-2_true": spec_true.get("spec_med_ell_-2", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_-1_true": spec_true.get("spec_med_ell_-1", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_1_true": spec_true.get("spec_med_ell_1", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_2_true": spec_true.get("spec_med_ell_2", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_3_true": spec_true.get("spec_med_ell_3", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_-3_true": spec_true.get("spec_std_ell_-3", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_-2_true": spec_true.get("spec_std_ell_-2", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_-1_true": spec_true.get("spec_std_ell_-1", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_1_true": spec_true.get("spec_std_ell_1", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_2_true": spec_true.get("spec_std_ell_2", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_3_true": spec_true.get("spec_std_ell_3", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_-3_decoy": spec_decoy.get("spec_med_ell_-3", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_-2_decoy": spec_decoy.get("spec_med_ell_-2", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_-1_decoy": spec_decoy.get("spec_med_ell_-1", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_1_decoy": spec_decoy.get("spec_med_ell_1", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_2_decoy": spec_decoy.get("spec_med_ell_2", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_med_ell_3_decoy": spec_decoy.get("spec_med_ell_3", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_-3_decoy": spec_decoy.get("spec_std_ell_-3", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_-2_decoy": spec_decoy.get("spec_std_ell_-2", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_-1_decoy": spec_decoy.get("spec_std_ell_-1", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_1_decoy": spec_decoy.get("spec_std_ell_1", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_2_decoy": spec_decoy.get("spec_std_ell_2", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "spec_std_ell_3_decoy": spec_decoy.get("spec_std_ell_3", float("nan")) if ref_amp > 0.0 else float("nan"),
         "true_scrambled": true_scrambled_1,
         "decoy_scrambled": decoy_scrambled_1,
         "decoded_true": decoded_true,
@@ -2439,6 +2543,36 @@ def run_experiment(
                     "proj_center_dy_true": result.get("proj_true", {}).get("proj_center_dy", float("nan")),
                     "proj_center_dx_decoy": result.get("proj_decoy", {}).get("proj_center_dx", float("nan")),
                     "proj_center_dy_decoy": result.get("proj_decoy", {}).get("proj_center_dy", float("nan")),
+                    "spec_peak_ell_true": result.get("spec_peak_ell_true", float("nan")),
+                    "spec_peak_ratio_true": result.get("spec_peak_ratio_true", float("nan")),
+                    "spec_stability_true": result.get("spec_stability_true", float("nan")),
+                    "spec_peak_ell_decoy": result.get("spec_peak_ell_decoy", float("nan")),
+                    "spec_peak_ratio_decoy": result.get("spec_peak_ratio_decoy", float("nan")),
+                    "spec_stability_decoy": result.get("spec_stability_decoy", float("nan")),
+                    "spec_med_ell_-3_true": result.get("spec_med_ell_-3_true", float("nan")),
+                    "spec_med_ell_-2_true": result.get("spec_med_ell_-2_true", float("nan")),
+                    "spec_med_ell_-1_true": result.get("spec_med_ell_-1_true", float("nan")),
+                    "spec_med_ell_1_true": result.get("spec_med_ell_1_true", float("nan")),
+                    "spec_med_ell_2_true": result.get("spec_med_ell_2_true", float("nan")),
+                    "spec_med_ell_3_true": result.get("spec_med_ell_3_true", float("nan")),
+                    "spec_std_ell_-3_true": result.get("spec_std_ell_-3_true", float("nan")),
+                    "spec_std_ell_-2_true": result.get("spec_std_ell_-2_true", float("nan")),
+                    "spec_std_ell_-1_true": result.get("spec_std_ell_-1_true", float("nan")),
+                    "spec_std_ell_1_true": result.get("spec_std_ell_1_true", float("nan")),
+                    "spec_std_ell_2_true": result.get("spec_std_ell_2_true", float("nan")),
+                    "spec_std_ell_3_true": result.get("spec_std_ell_3_true", float("nan")),
+                    "spec_med_ell_-3_decoy": result.get("spec_med_ell_-3_decoy", float("nan")),
+                    "spec_med_ell_-2_decoy": result.get("spec_med_ell_-2_decoy", float("nan")),
+                    "spec_med_ell_-1_decoy": result.get("spec_med_ell_-1_decoy", float("nan")),
+                    "spec_med_ell_1_decoy": result.get("spec_med_ell_1_decoy", float("nan")),
+                    "spec_med_ell_2_decoy": result.get("spec_med_ell_2_decoy", float("nan")),
+                    "spec_med_ell_3_decoy": result.get("spec_med_ell_3_decoy", float("nan")),
+                    "spec_std_ell_-3_decoy": result.get("spec_std_ell_-3_decoy", float("nan")),
+                    "spec_std_ell_-2_decoy": result.get("spec_std_ell_-2_decoy", float("nan")),
+                    "spec_std_ell_-1_decoy": result.get("spec_std_ell_-1_decoy", float("nan")),
+                    "spec_std_ell_1_decoy": result.get("spec_std_ell_1_decoy", float("nan")),
+                    "spec_std_ell_2_decoy": result.get("spec_std_ell_2_decoy", float("nan")),
+                    "spec_std_ell_3_decoy": result.get("spec_std_ell_3_decoy", float("nan")),
                     "oam_peak_pre_true": result.get("oam_pre_true", {}).get("m_peak", float("nan")),
                     "oam_peak_ratio_pre_true": result.get("oam_pre_true", {}).get("m_peak_ratio", float("nan")),
                     "oam_pre_raw_peak_true": result.get("oam_pre_true", {}).get("m_peak_raw", float("nan")),

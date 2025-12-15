@@ -7,6 +7,7 @@ Analysis scripts and files for paper reproducibility. Standalone copy of the OAM
 - `gka_oam_visualize.py`: roll-up plots (histograms/scatter) from the summary CSV.
 - `gka_oam_image_summary_v3.csv`: latest metrics table from the last run.
 - Raw images under `Generalized angle-OAM Talbot effect/` and `OAM sorting/` (plus prior outputs/plots).
+- `spiral_decoder_experiment.py`: synthetic spiral/OAM encoding-decoding benchmark with blind controls.
 
 ## Usage
 ```bash
@@ -24,6 +25,12 @@ python gka_oam_extended.py --root . \
 
 # Make roll-up plots
 python gka_oam_visualize.py
+
+# Spiral decoder experiment (synthetic challenge/response)
+python spiral_decoder_experiment.py --out-dir Results/spiral_trials --trials 4
+```
+
+The spiral experiment generates simple patterns, encodes them with matched vs decoy spiral phase masks, runs a grid of candidate decoders plus baseline enhancers, and writes `spiral_decoder_results.csv` (and PNGs unless `--no-save-images` is set). Metrics (SSIM/PSNR/NCC) help quantify how often the matched geometry wins over wrong-geometry and generic methods.
 ```
 
 ## Minimal Python deps
