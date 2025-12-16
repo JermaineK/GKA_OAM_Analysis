@@ -26,3 +26,7 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Experiment artifacts (keep results out of git by default)
+Results/
+results_manifest.json

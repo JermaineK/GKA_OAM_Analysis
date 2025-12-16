@@ -161,13 +161,19 @@ def find_ring_radius(image: np.ndarray, center: Optional[Tuple[float, float]] = 
 
 
 def extract_I_theta(image: np.ndarray, cx: float, cy: float, r: float, n_samples: int = 720) -> Tuple[np.ndarray, np.ndarray]:
-    """Sample intensity along a ring at radius r."""
-    thetas = np.linspace(0, 2 * np.pi, n_samples)
-    xs = (cx + r * np.cos(thetas)).astype(int)
-    ys = (cy + r * np.sin(thetas)).astype(int)
-    mask = (xs >= 0) & (xs < image.shape[1]) & (ys >= 0) & (ys < image.shape[0])
-    I = np.zeros_like(thetas, dtype=np.float32)
-    I[mask] = image[ys[mask], xs[mask]]
+    """Sample intensity along a ring at radius r with subpixel interpolation."""
+    thetas = np.linspace(0, 2 * np.pi, n_samples, endpoint=False)
+    xs = (cx + r * np.cos(thetas)).astype(np.float32)
+    ys = (cy + r * np.sin(thetas)).astype(np.float32)
+    map_x = xs.reshape(1, -1)
+    map_y = ys.reshape(1, -1)
+    I = cv2.remap(
+        image.astype(np.float32),
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT,
+    ).ravel()
     return thetas, I
 
 
@@ -190,28 +196,54 @@ def gka_metrics(
     save_plots: bool,
     plot_dir: Path,
     plot_label: str,
+    ref_power: Optional[np.ndarray] = None,
+    n_theta: int = 2048,
 ) -> dict:
     """Compute angular metrics for a single frame."""
-    thetas, I = extract_I_theta(image, cx, cy, radius)
+    thetas, I = extract_I_theta(image, cx, cy, radius, n_samples=n_theta)
     I_norm = I / (I.max() + 1e-6)
+    window = np.hanning(len(I_norm))
+    I_win = I_norm * window
     median = float(np.median(I_norm))
     coherence_q = quantile_contrast(I_norm)
     coherence_max_med = float(I_norm.max() / max(median, 1e-6))
 
-    F = np.fft.rfft(I_norm)
+    F = np.fft.rfft(I_win)
     mags = np.abs(F)
-    if len(mags) > 1:
-        m_star = int(np.argmax(mags[1:]) + 1)
-        energy = float((mags**2).sum())
-        purity = float((mags[m_star] ** 2) / (energy + 1e-9))
-        power_odd = float((mags[1::2] ** 2).sum())
-        power_even = float((mags[2::2] ** 2).sum())
-        parity_odd = float(power_odd / (power_even + power_odd + 1e-9))
-    else:
-        m_star = np.nan
-        purity = np.nan
-        parity_odd = np.nan
-        energy = 0.0
+    m_max = max(1, len(mags) // 8)
+    mags_trust = mags.copy()
+    mags_trust[m_max + 1 :] = 0.0
+    def peak_stats(mvec: np.ndarray) -> Tuple[float, float, float]:
+        if len(mvec) <= 1:
+            return np.nan, np.nan, np.nan
+        peak_idx = int(np.argmax(mvec[1:]) + 1)
+        peak = float(mvec[peak_idx])
+        second = float(np.partition(mvec[1:], -2)[-2]) if len(mvec) > 3 else 0.0
+        ratio = float(peak / (second + 1e-9))
+        neigh = np.delete(mvec[1:], np.argmax(mvec[1:]))
+        noise = float(np.median(neigh) + 1e-9)
+        z = float((peak - noise) / (np.median(np.abs(neigh - noise)) + 1e-9))
+        return peak_idx, ratio, z
+    m_star, m_ratio, m_z = peak_stats(mags_trust)
+    energy = float((mags_trust ** 2).sum())
+    purity = float((mags_trust[int(m_star)] ** 2) / (energy + 1e-9)) if np.isfinite(m_star) else np.nan
+    power_odd = float((mags_trust[1::2] ** 2).sum())
+    power_even = float((mags_trust[2::2] ** 2).sum())
+    parity_odd = float(power_odd / (power_even + power_odd + 1e-9)) if energy > 0 else np.nan
+
+    # Reference subtraction (intensity spectrum)
+    m_star_corr = np.nan
+    m_ratio_corr = np.nan
+    m_z_corr = np.nan
+    if ref_power is not None and len(ref_power) == len(mags_trust):
+        P_img = mags_trust ** 2
+        P_ref = ref_power
+        fit_mask = slice(1, min(6, len(P_ref)))
+        alpha = float(np.sum(P_img[fit_mask] * P_ref[fit_mask]) / (np.sum(P_ref[fit_mask] ** 2) + 1e-9))
+        P_corr = P_img - alpha * P_ref
+        P_corr = np.clip(P_corr, 0.0, None)
+        mags_corr = np.sqrt(P_corr)
+        m_star_corr, m_ratio_corr, m_z_corr = peak_stats(mags_corr)
 
     thr = median + 0.3 * (float(I_norm.max()) - median)
     coverage = float((I_norm > thr).mean())
@@ -221,9 +253,11 @@ def gka_metrics(
     contrasts = []
     mean_norm = []
     eta_vals = []
+    ring_peaks = []
     for r_here in r_samples:
-        _, I_r = extract_I_theta(image, cx, cy, r_here)
+        _, I_r = extract_I_theta(image, cx, cy, r_here, n_samples=n_theta)
         I_r_norm = I_r / (I_r.max() + 1e-6)
+        I_r_win = I_r_norm * np.hanning(len(I_r_norm))
         c_val = quantile_contrast(I_r_norm)
         r_vals.append(r_here)
         contrasts.append(c_val)
@@ -232,11 +266,31 @@ def gka_metrics(
         key = f"contrast_f{int(round(frac * 100)):02d}"
         contrast_per_r[key] = c_val
         eta_vals.append(odd_contrast_ring(I_r_norm))
+        mags_r = np.abs(np.fft.rfft(I_r_win))
+        mags_r[m_max + 1 :] = 0.0
+        pk_r, ratio_r, z_r = peak_stats(mags_r)
+        ring_peaks.append((pk_r, ratio_r, z_r))
 
     r_vals = np.array(r_vals, dtype=np.float64)
     contrasts = np.array(contrasts, dtype=np.float64)
     mean_norm = np.array(mean_norm, dtype=np.float64)
     eta_vals = np.array(eta_vals, dtype=np.float64)
+
+    # Ring consensus
+    ring_pk_vals = [pk for pk, _, _ in ring_peaks if np.isfinite(pk)]
+    ring_ratio_vals = [rt for _, rt, _ in ring_peaks if np.isfinite(rt)]
+    ring_z_vals = [zt for _, _, zt in ring_peaks if np.isfinite(zt)]
+    ring_consensus = float(ring_pk_vals.count(max(set(ring_pk_vals), key=ring_pk_vals.count)) / len(ring_pk_vals)) if ring_pk_vals else np.nan
+    ring_ratio_med = float(np.median(ring_ratio_vals)) if ring_ratio_vals else np.nan
+    ring_z_med = float(np.median(ring_z_vals)) if ring_z_vals else np.nan
+
+    def confidence(ratio: float, z: float, consensus: float) -> float:
+        if not (np.isfinite(ratio) and np.isfinite(z) and np.isfinite(consensus)):
+            return 0.0
+        score = 2.0 * (ratio - 1.0) + 0.5 * (z / 3.0) + 2.0 * (consensus - 0.5)
+        return float(1.0 / (1.0 + np.exp(-score)))
+    m_conf = confidence(m_ratio, m_z, ring_consensus)
+    m_conf_corr = confidence(m_ratio_corr, m_z_corr, ring_consensus) if np.isfinite(m_ratio_corr) else 0.0
 
     # BORGT-like slope: log contrast vs log radius, with guards and a light outlier filter
     base_mask = (
@@ -336,6 +390,16 @@ def gka_metrics(
         "coherence_q": coherence_q,
         "coherence_max_med": coherence_max_med,
         "m_star": m_star,
+        "m_ratio": m_ratio,
+        "m_z": m_z,
+        "m_star_corr": m_star_corr,
+        "m_ratio_corr": m_ratio_corr,
+        "m_z_corr": m_z_corr,
+        "m_conf": m_conf,
+        "m_conf_corr": m_conf_corr,
+        "ring_consensus": ring_consensus,
+        "ring_ratio_med": ring_ratio_med,
+        "ring_z_med": ring_z_med,
         "purity": purity,
         "parity_odd": parity_odd,
         "coverage": coverage,
@@ -388,6 +452,7 @@ def main():
     parser.add_argument("--out-csv", default="gka_oam_image_summary_v4.csv", help="output CSV path")
     parser.add_argument("--plots", action="store_true", help="save I(theta) plots")
     parser.add_argument("--plot-dir", default=None, help="optional plot directory (defaults to <root>/gka_oam_plots)")
+    parser.add_argument("--n-theta", type=int, default=2048, help="samples along theta for ring extraction")
 
     args = parser.parse_args()
     root = Path(args.root)
@@ -403,12 +468,32 @@ def main():
 
     # Images
     img_paths = collect_images(root, args.image_glob)
+    ref_power_cache: dict = {}
+    # First pass: collect reference spectra (filenames containing inphase/zero/ref)
+    keywords = ("inphase", "reference", "ref_", "zero")
+    for path in img_paths:
+        lower = path.name.lower()
+        if any(k in lower for k in keywords):
+            img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+            img_norm = normalize_image(img)
+            cx, cy, r = find_ring_radius(img_norm)
+            _, I_ref = extract_I_theta(img_norm, cx, cy, r, n_samples=args.n_theta)
+            I_ref_norm = I_ref / (I_ref.max() + 1e-6)
+            I_ref_win = I_ref_norm * np.hanning(len(I_ref_norm))
+            m_ref = np.abs(np.fft.rfft(I_ref_win))
+            m_max_ref = max(1, len(m_ref) // 8)
+            m_ref[m_max_ref + 1 :] = 0.0
+            ref_power_cache[path.parent] = (m_ref ** 2)
+
     for path in img_paths:
         img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if img is None:
             continue
         img_norm = normalize_image(img)
         cx, cy, r = find_ring_radius(img_norm)
+        ref_power = ref_power_cache.get(path.parent)
         metrics = gka_metrics(
             img_norm,
             cx,
@@ -421,6 +506,8 @@ def main():
             args.plots,
             plot_dir,
             plot_label=path.stem,
+            ref_power=ref_power,
+            n_theta=args.n_theta,
         )
         records.append(
             {
@@ -461,6 +548,8 @@ def main():
                     args.plots,
                     plot_dir,
                     plot_label=f"{path.stem}_{idx}",
+                    ref_power=None,
+                    n_theta=args.n_theta,
                 )
                 records.append(
                     {

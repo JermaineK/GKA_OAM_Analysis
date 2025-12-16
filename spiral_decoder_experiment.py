@@ -14,6 +14,7 @@ Usage (typical):
 """
 import argparse
 import json
+import subprocess
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -1031,6 +1032,20 @@ def helical_spectrum_stability(
         out[f"spec_med_ell_{ell}"] = med_spec[ell]
         out[f"spec_std_ell_{ell}"] = std_spec[ell]
     return out
+
+
+def git_hash() -> str:
+    """
+    Best-effort current git hash for manifest logging.
+    """
+    try:
+        return (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
+            .decode("utf-8")
+            .strip()
+        )
+    except Exception:
+        return "unknown"
 
 
 def phase_circulation_annulus(
@@ -2161,6 +2176,10 @@ def run_trial(
         "true_mask": asdict(true_mask),
         "decoy_mask": asdict(decoy_mask),
         "best_mask_true": asdict(best_mask_true),
+        "label_ell_true": int(true_mask.ell),
+        "field_peak_ell_true": spec_true.get("spec_peak_ell", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "field_peak_ratio_true": spec_true.get("spec_peak_ratio", float("nan")) if ref_amp > 0.0 else float("nan"),
+        "field_stability_true": spec_true.get("spec_stability_frac", float("nan")) if ref_amp > 0.0 else float("nan"),
         "best_mask_decoy": asdict(best_mask_decoy),
         "self_score_true": self_score_true,
         "self_score_decoy": self_score_decoy,
@@ -2361,6 +2380,7 @@ def run_experiment(
     pitches: Optional[Sequence[float]] = None,
     knees: Optional[Sequence[float]] = None,
 ) -> pd.DataFrame:
+    manifest_path = Path("results_manifest.json")
     out_dir.mkdir(parents=True, exist_ok=True)
     date_str = datetime.now().strftime("%y%m%d")
     existing = sorted(out_dir.glob(f"spiral_decoder_results_{date_str}_*.csv"))
@@ -2384,6 +2404,25 @@ def run_experiment(
     grid_pitches = [0.0, 1.0, 1.5, 2.5, 3.0] if pitches is None else list(pitches)
     grid_knees = [0.0, 0.5, 1.0] if knees is None else list(knees)
     grid = candidate_grid(ells=grid_ells, pitches=grid_pitches, knees=grid_knees)
+
+    manifest_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "git_hash": git_hash(),
+        "out_dir": str(out_dir),
+        "stamped_csv": str(stamped),
+        "seed": seed,
+        "trials": trials,
+        "image_size": image_size,
+        "gaussian_sigma": noise.gaussian_sigma,
+        "poisson_scale": noise.poisson_scale,
+        "ref_amp": ref_amp,
+        "ref_kx": ref_kx,
+        "ref_ky": ref_ky,
+        "approaches": approaches,
+        "ells": grid_ells,
+        "pitches": grid_pitches,
+        "knees": grid_knees,
+    }
 
     rows: List[Dict[str, object]] = []
     for trial in range(trials):
@@ -2453,6 +2492,10 @@ def run_experiment(
                     "decoy_mask": json.dumps(result["decoy_mask"]),
                     "best_mask_true": json.dumps(result["best_mask_true"]),
                     "best_mask_decoy": json.dumps(result["best_mask_decoy"]),
+                    "label_ell_true": result.get("label_ell_true", float("nan")),
+                    "field_peak_ell_true": result.get("field_peak_ell_true", float("nan")),
+                    "field_peak_ratio_true": result.get("field_peak_ratio_true", float("nan")),
+                    "field_stability_true": result.get("field_stability_true", float("nan")),
                     "self_score_true": result["self_score_true"],
                     "self_score_decoy": result["self_score_decoy"],
                     "margin_true": result["margin_true"],
@@ -2637,6 +2680,17 @@ def run_experiment(
             df.to_csv(path, index=False)
         except PermissionError:
             continue
+    try:
+        # Append manifest entry
+        manifest = []
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text())
+            if not isinstance(manifest, list):
+                manifest = []
+        manifest.append(manifest_entry)
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+    except Exception:
+        pass
     print(f"Saved results to {csv_path} and {stamped}")
     return df
 
